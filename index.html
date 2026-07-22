@@ -35,8 +35,19 @@ const BARVA_SVERENO = "#e8730c";      // svěřeno MČ, 100 % (oranžová)
 const BARVA_SVERENO_SPOLU = "#b5216b"; // svěřeno MČ, spoluvlastnictví (magenta - teplá, k fialové, ale daleko od BARVA_SPOLU i BARVA_MC)
 const BARVA_MC = "#ff1f8f";           // hranice MČ (výrazná, univerzální)
 
-const renderer = L.canvas({ padding: 0.5 });
-const map = L.map("map", { renderer: renderer, preferCanvas: true }).setView([50.08, 14.44], 11);
+const map = L.map("map", { preferCanvas: true }).setView([50.08, 14.44], 11);
+
+/* Pořadí vrstev řešíme panes (funguje i při pozdějším líném načtení kontextu):
+   pozadí (T/R plochy + kontext veškerý majetek) < průnik s T/R (sytě) < hranice MČ.
+   Nepodkladové panes s pointer-events:none nechají klikat skrz na interaktivní. */
+[["pBg", 410, true], ["pFg", 420, false], ["pTop", 430, true]].forEach(([n, z, noEvt]) => {
+  map.createPane(n);
+  map.getPane(n).style.zIndex = z;
+  if (noEvt) map.getPane(n).style.pointerEvents = "none";
+});
+const rBg = L.canvas({ pane: "pBg", padding: 0.5 });   // T/R + kontext (neinteraktivní)
+const rFg = L.canvas({ pane: "pFg", padding: 0.5 });   // majetek v T/R (interaktivní)
+const rTop = L.canvas({ pane: "pTop", padding: 0.5 }); // hranice MČ
 
 /* ---------- podklady ---------- */
 const ortofoto = L.tileLayer.wms("https://ags.cuzk.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer", {
@@ -53,8 +64,11 @@ const katastr = L.tileLayer.wms("https://services.cuzk.cz/wms/wms.asp", {
 
 /* ---------- styly vektorů ---------- */
 function styleTR(f) {
-  return { color: BARVA_TR[f.properties.vyuziti] || "#999", weight: 0.6, opacity: 0.5,
-           fillColor: BARVA_TR[f.properties.vyuziti] || "#999", fillOpacity: 0.15 };
+  const v = f.properties.vyuziti;
+  const c = BARVA_TR[v] || "#999";
+  const ob = v === "obytná";   // obytné mírně zvýraznit (jinak proti pozadí mizí)
+  return { color: c, weight: ob ? 1 : 0.6, opacity: ob ? 0.8 : 0.45,
+           fillColor: c, fillOpacity: ob ? 0.28 : 0.12 };
 }
 function barvaParcely(p) {
   const spolu = p.podil < 1;
@@ -63,7 +77,12 @@ function barvaParcely(p) {
 }
 function styleParcela(f) {
   const c = barvaParcely(f.properties);
-  return { color: c, weight: 1, opacity: 0.95, fillColor: c, fillOpacity: 0.35 };
+  return { color: c, weight: 1, opacity: 0.95, fillColor: c, fillOpacity: 0.4 };
+}
+/* kontext = veškerý majetek (i mimo T/R), stejné barvy ale zeslabené */
+function styleVse(f) {
+  const c = barvaParcely(f.properties);
+  return { color: c, weight: 0.4, opacity: 0.5, fillColor: c, fillOpacity: 0.14 };
 }
 /* hranice MČ = výrazná barevná čára s bílým lemem (kasingem), aby byla vidět
    univerzálně - jak globálně nad ortofotem, tak po přiblížení nad černými
@@ -72,12 +91,14 @@ const styleMC = { color: BARVA_MC, weight: 2.5, opacity: 1, fill: false, dashArr
 const styleMCLem = { color: "#ffffff", weight: 5.5, opacity: 0.55, fill: false, lineCap: "round" };
 
 /* ---------- načtení dat ---------- */
-const trLayer = L.geoJSON(null, { style: styleTR, renderer: renderer, interactive: false });
-const parLayer = L.geoJSON(null, { style: styleParcela, renderer: renderer, onEachFeature: onParcela });
-const mcLem = L.geoJSON(null, { style: styleMCLem, renderer: renderer, interactive: false });
-const mcLine = L.geoJSON(null, { style: styleMC, renderer: renderer, interactive: false });
+const trLayer = L.geoJSON(null, { style: styleTR, renderer: rBg, interactive: false });
+const vseLayer = L.geoJSON(null, { style: styleVse, renderer: rBg, interactive: false }); // kontext, líně
+const parLayer = L.geoJSON(null, { style: styleParcela, renderer: rFg, onEachFeature: onParcela });
+const mcLem = L.geoJSON(null, { style: styleMCLem, renderer: rTop, interactive: false });
+const mcLine = L.geoJSON(null, { style: styleMC, renderer: rTop, interactive: false });
 const mcLayer = L.layerGroup([mcLem, mcLine]);   // lem pod barevnou čárou
 const mcBounds = {};   // kod_mc -> L.latLngBounds
+let vseLoaded = false;   // veškerý majetek se stáhne až při prvním zapnutí (32 MB)
 
 function fmt(n) { return (n == null) ? "?" : n.toLocaleString("cs-CZ"); }
 function onParcela(f, layer) {
@@ -114,9 +135,20 @@ L.control.layers(
   { "Katastr – hranice + čísla (ČÚZK)": katastr,
     "T/R plochy (MPP)": trLayer,
     "Pozemky města v T/R": parLayer,
+    "Veškerý majetek města (i mimo T/R)": vseLayer,
     "Hranice MČ": mcLayer },
   { collapsed: false }
 ).addTo(map);
+
+/* líné načtení kontextové vrstvy (velký soubor) až při prvním zapnutí */
+map.on("overlayadd", function (e) {
+  if (e.layer === vseLayer && !vseLoaded) {
+    vseLoaded = true;
+    fetch("data/vsechen_majetek.geojson").then(r => r.json())
+      .then(d => vseLayer.addData(d))
+      .catch(err => { vseLoaded = false; alert("Chyba načtení veškerého majetku: " + err); });
+  }
+});
 
 /* ---------- výběr MČ ---------- */
 function buildSelect(mc) {
@@ -157,8 +189,8 @@ legend.onAdd = function () {
     "<div><i style='background:" + BARVA_TR["obytná"] + "'></i>obytná</div>" +
     "<div><i style='background:" + BARVA_TR["produkční"] + "'></i>produkční</div>" +
     "<div><i style='background:" + BARVA_TR["rekreační"] + "'></i>rekreační</div>" +
-    "<div><i style='background:" + BARVA_TR["přírodní"] + "'></i>přírodní</div>" +
-    "<div class='muted' style='margin-top:6px;max-width:210px'>Zobrazeny jsou vlastněné parcely protínající transformační/rozvojové plochy. Nejde o rozlišení, zda jsou volné pro vybavenost.</div>";
+    "<div><i style='background:" + BARVA_TR["přírodní"] + "'></i>přírodní <span class='muted'>(obytná zvýrazněna)</span></div>" +
+    "<div class='muted' style='margin-top:6px;max-width:220px'>Sytě = majetek <b>oříznutý na T/R plochy</b> (skutečný průnik). Zeslabeně (volitelná vrstva) = <b>veškerý majetek města</b> i mimo T/R. Nejde o rozlišení, zda je pozemek volný pro vybavenost.</div>";
   return d;
 };
 legend.addTo(map);
