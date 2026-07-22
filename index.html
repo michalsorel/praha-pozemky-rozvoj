@@ -29,9 +29,10 @@
 <script>
 /* ---------- barvy ---------- */
 const BARVA_TR = { "obytná": "#e06666", "produkční": "#8f8f8f", "rekreační": "#7fbf7f", "přírodní": "#3f8f5f", "nestanoveno": "#c9a24b" };
-const BARVA_VLASTNI = "#1f6feb";      // přímo hl. m. Praha, 100 %
-const BARVA_SPOLU = "#8438d6";        // přímo hl. m. Praha, spoluvlastnictví (dofialova)
-const BARVA_SVERENO = "#e8730c";      // svěřeno MČ
+const BARVA_VLASTNI = "#1f6feb";      // nesvěřeno, hl. m. Praha 100 % (modrá)
+const BARVA_SPOLU = "#8438d6";        // nesvěřeno, spoluvlastnictví (fialová)
+const BARVA_SVERENO = "#e8730c";      // svěřeno MČ, 100 % (oranžová)
+const BARVA_SVERENO_SPOLU = "#b5216b"; // svěřeno MČ, spoluvlastnictví (magenta - teplá, k fialové, ale daleko od BARVA_SPOLU i BARVA_MC)
 const BARVA_MC = "#ff1f8f";           // hranice MČ (výrazná, univerzální)
 
 const renderer = L.canvas({ padding: 0.5 });
@@ -56,8 +57,9 @@ function styleTR(f) {
            fillColor: BARVA_TR[f.properties.vyuziti] || "#999", fillOpacity: 0.15 };
 }
 function barvaParcely(p) {
-  if (p.svereno == 1) return BARVA_SVERENO;        // svěřeno MČ
-  return p.podil < 1 ? BARVA_SPOLU : BARVA_VLASTNI; // nesvěřeno: spoluvl. dofialova / 100 % modrá
+  const spolu = p.podil < 1;
+  if (p.svereno == 1) return spolu ? BARVA_SVERENO_SPOLU : BARVA_SVERENO; // svěřeno: spoluvl. / 100 %
+  return spolu ? BARVA_SPOLU : BARVA_VLASTNI;                             // nesvěřeno: spoluvl. / 100 %
 }
 function styleParcela(f) {
   const c = barvaParcely(f.properties);
@@ -145,9 +147,10 @@ legend.onAdd = function () {
   const d = L.DomUtil.create("div", "panel legend");
   d.innerHTML =
     "<div><b>Pozemky v majetku města</b></div>" +
-    "<div><i style='background:" + BARVA_VLASTNI + "'></i>přímo hl. m. Praha (100 %)</div>" +
-    "<div><i style='background:" + BARVA_SPOLU + "'></i>přímo hl. m. Praha (spoluvlastnictví)</div>" +
-    "<div><i style='background:" + BARVA_SVERENO + "'></i>svěřeno městské části</div>" +
+    "<div><i style='background:" + BARVA_VLASTNI + "'></i>hl. m. Praha 100 %</div>" +
+    "<div><i style='background:" + BARVA_SPOLU + "'></i>hl. m. Praha – spoluvlastnictví</div>" +
+    "<div><i style='background:" + BARVA_SVERENO + "'></i>svěřeno MČ – 100 %</div>" +
+    "<div><i style='background:" + BARVA_SVERENO_SPOLU + "'></i>svěřeno MČ – spoluvlastnictví</div>" +
     "<div style='margin-top:6px'><b>Hranice</b></div>" +
     "<div><i style='background:" + BARVA_MC + "'></i>městská část</div>" +
     "<div style='margin-top:6px'><b>T/R plochy (MPP)</b></div>" +
