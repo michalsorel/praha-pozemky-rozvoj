@@ -125,6 +125,10 @@ const mcLayer = L.layerGroup([mcLem, mcLine]);   // lem pod barevnou čárou
 const mcBounds = {};   // kod_mc -> L.latLngBounds
 let vseLoaded = false;    // veškerý majetek už načten
 let vseLoading = null;    // rozpracovaný fetch (aby se nespustil dvakrát)
+/* MPP vrstvy (T/R plochy + omezení pozemků jen na T/R) jsou implicitně vypnuté;
+   zapnou se URL parametrem ?TRplochy (např. ?TRplochy nebo ?TRplochy=1). */
+const _trParam = new URLSearchParams(location.search).get("TRplochy");
+const mppOn = _trParam !== null && _trParam !== "0" && _trParam.toLowerCase() !== "false";
 
 function fmt(n) { return (n == null) ? "?" : n.toLocaleString("cs-CZ"); }
 function onParcela(f, layer) {
@@ -145,7 +149,8 @@ Promise.all([
   fetch("data/majetek.geojson").then(r => r.json()),
   fetch("data/mc.geojson").then(r => r.json())
 ]).then(([tr, maj, mc]) => {
-  trLayer.addData(tr).addTo(map);
+  trLayer.addData(tr);
+  if (mppOn) trLayer.addTo(map);   // T/R plochy implicitně vypnuté (viz mppOn / ?TRplochy)
   parClipped.addData(maj);
   mcLem.addData(mc);
   mcLine.addData(mc);
@@ -170,7 +175,7 @@ function loadVse() {
    "Pozemky města" = hlavní přepínač, zda pozemky vůbec kreslit.
    "Pozemky jen v T/R" = zda je omezit na průnik s T/R (parClipped),
    nebo ukázat veškerý majetek (parAll). Barvy jsou v obou případech stejné. */
-const stav = { pozemky: true, jenTR: true };
+const stav = { pozemky: true, jenTR: mppOn };
 function updateParcely() {
   const showClip = stav.pozemky && stav.jenTR;
   const showAll  = stav.pozemky && !stav.jenTR;
@@ -237,9 +242,9 @@ function buildControls(mc) {
     "<label><input type='checkbox' id='l-kat'> Katastr</label>" +
     "<label><input type='checkbox' id='l-mc' checked> Hranice MČ</label>" +
     "<label><input type='checkbox' id='l-poz' checked> Pozemky města</label>" +
-    "<label><input type='checkbox' id='l-tr' checked> T/R plochy (MPP)</label>" +
     "<hr class='sep'>" +
-    "<label><input type='checkbox' id='l-jentr' checked> Pozemky jen v T/R</label>";
+    "<label><input type='checkbox' id='l-tr'" + (mppOn ? " checked" : "") + "> T/R plochy (MPP)</label>" +
+    "<label><input type='checkbox' id='l-jentr'" + (mppOn ? " checked" : "") + "> Pozemky jen v T/R</label>";
   const $ = id => document.getElementById(id);
   $("mc-select").addEventListener("change", function () {
     const v = this.value;
