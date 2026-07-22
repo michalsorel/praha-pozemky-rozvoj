@@ -29,8 +29,10 @@
 <script>
 /* ---------- barvy ---------- */
 const BARVA_TR = { "obytná": "#e06666", "produkční": "#8f8f8f", "rekreační": "#7fbf7f", "přírodní": "#3f8f5f", "nestanoveno": "#c9a24b" };
-const BARVA_VLASTNI = "#1f6feb";      // přímo hl. m. Praha
+const BARVA_VLASTNI = "#1f6feb";      // přímo hl. m. Praha, 100 %
+const BARVA_SPOLU = "#8438d6";        // přímo hl. m. Praha, spoluvlastnictví (dofialova)
 const BARVA_SVERENO = "#e8730c";      // svěřeno MČ
+const BARVA_MC = "#ff1f8f";           // hranice MČ (výrazná, univerzální)
 
 const renderer = L.canvas({ padding: 0.5 });
 const map = L.map("map", { renderer: renderer, preferCanvas: true }).setView([50.08, 14.44], 11);
@@ -53,17 +55,26 @@ function styleTR(f) {
   return { color: BARVA_TR[f.properties.vyuziti] || "#999", weight: 0.6, opacity: 0.5,
            fillColor: BARVA_TR[f.properties.vyuziti] || "#999", fillOpacity: 0.15 };
 }
-function styleParcela(f) {
-  const sv = f.properties.svereno == 1;
-  return { color: sv ? BARVA_SVERENO : BARVA_VLASTNI, weight: 1, opacity: 0.95,
-           fillColor: sv ? BARVA_SVERENO : BARVA_VLASTNI, fillOpacity: 0.35 };
+function barvaParcely(p) {
+  if (p.svereno == 1) return BARVA_SVERENO;        // svěřeno MČ
+  return p.podil < 1 ? BARVA_SPOLU : BARVA_VLASTNI; // nesvěřeno: spoluvl. dofialova / 100 % modrá
 }
-const styleMC = { color: "#111", weight: 1.5, opacity: 0.8, fill: false, dashArray: "4 3" };
+function styleParcela(f) {
+  const c = barvaParcely(f.properties);
+  return { color: c, weight: 1, opacity: 0.95, fillColor: c, fillOpacity: 0.35 };
+}
+/* hranice MČ = výrazná barevná čára s bílým lemem (kasingem), aby byla vidět
+   univerzálně - jak globálně nad ortofotem, tak po přiblížení nad černými
+   katastrálními hranicemi (jinak by černá s černou splynula). */
+const styleMC = { color: BARVA_MC, weight: 2.5, opacity: 1, fill: false, dashArray: "7 5", lineCap: "round" };
+const styleMCLem = { color: "#ffffff", weight: 5.5, opacity: 0.55, fill: false, lineCap: "round" };
 
 /* ---------- načtení dat ---------- */
 const trLayer = L.geoJSON(null, { style: styleTR, renderer: renderer, interactive: false });
 const parLayer = L.geoJSON(null, { style: styleParcela, renderer: renderer, onEachFeature: onParcela });
-const mcLayer = L.geoJSON(null, { style: styleMC, renderer: renderer, interactive: false });
+const mcLem = L.geoJSON(null, { style: styleMCLem, renderer: renderer, interactive: false });
+const mcLine = L.geoJSON(null, { style: styleMC, renderer: renderer, interactive: false });
+const mcLayer = L.layerGroup([mcLem, mcLine]);   // lem pod barevnou čárou
 const mcBounds = {};   // kod_mc -> L.latLngBounds
 
 function fmt(n) { return (n == null) ? "?" : n.toLocaleString("cs-CZ"); }
@@ -87,10 +98,12 @@ Promise.all([
 ]).then(([tr, maj, mc]) => {
   trLayer.addData(tr).addTo(map);
   parLayer.addData(maj).addTo(map);
-  mcLayer.addData(mc).addTo(map);
-  mcLayer.eachLayer(l => { mcBounds[l.feature.properties.kod_mc] = l.getBounds(); });
+  mcLem.addData(mc);
+  mcLine.addData(mc);
+  mcLayer.addTo(map);
+  mcLine.eachLayer(l => { mcBounds[l.feature.properties.kod_mc] = l.getBounds(); });
   buildSelect(mc);
-  map.fitBounds(mcLayer.getBounds());
+  map.fitBounds(mcLine.getBounds());
 }).catch(e => alert("Chyba načtení dat: " + e));
 
 /* ---------- ovládání vrstev ---------- */
@@ -122,7 +135,7 @@ function buildSelect(mc) {
   document.getElementById("mc-select").addEventListener("change", function () {
     const v = this.value;
     if (v && mcBounds[v]) map.fitBounds(mcBounds[v]);
-    else map.fitBounds(mcLayer.getBounds());
+    else map.fitBounds(mcLine.getBounds());
   });
 }
 
@@ -132,8 +145,11 @@ legend.onAdd = function () {
   const d = L.DomUtil.create("div", "panel legend");
   d.innerHTML =
     "<div><b>Pozemky v majetku města</b></div>" +
-    "<div><i style='background:" + BARVA_VLASTNI + "'></i>přímo hl. m. Praha</div>" +
+    "<div><i style='background:" + BARVA_VLASTNI + "'></i>přímo hl. m. Praha (100 %)</div>" +
+    "<div><i style='background:" + BARVA_SPOLU + "'></i>přímo hl. m. Praha (spoluvlastnictví)</div>" +
     "<div><i style='background:" + BARVA_SVERENO + "'></i>svěřeno městské části</div>" +
+    "<div style='margin-top:6px'><b>Hranice</b></div>" +
+    "<div><i style='background:" + BARVA_MC + "'></i>městská část</div>" +
     "<div style='margin-top:6px'><b>T/R plochy (MPP)</b></div>" +
     "<div><i style='background:" + BARVA_TR["obytná"] + "'></i>obytná</div>" +
     "<div><i style='background:" + BARVA_TR["produkční"] + "'></i>produkční</div>" +
