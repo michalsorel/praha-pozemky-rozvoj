@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pozemky města v rozvojových plochách</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  #map { position: absolute; inset: 0; }
+  .panel {
+    background: rgba(255,255,255,0.94); padding: 10px 12px; border-radius: 8px;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.3); font-size: 13px; color: #111; line-height: 1.35;
+  }
+  .panel h1 { font-size: 14px; margin: 0 0 6px; }
+  .panel select { width: 100%; padding: 4px; font-size: 13px; margin-top: 4px; }
+  .legend i { display: inline-block; width: 14px; height: 14px; margin-right: 6px; vertical-align: -2px; border: 1px solid rgba(0,0,0,0.35); }
+  .legend div { margin: 3px 0; }
+  .muted { color: #555; font-size: 12px; }
+  .leaflet-tooltip.parc { font-size: 12px; line-height: 1.3; }
+  a { color: #1a5fb4; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script>
+/* ---------- barvy ---------- */
+const BARVA_TR = { "obytná": "#e06666", "produkční": "#8f8f8f", "rekreační": "#7fbf7f", "přírodní": "#3f8f5f", "nestanoveno": "#c9a24b" };
+const BARVA_VLASTNI = "#1f6feb";      // přímo hl. m. Praha
+const BARVA_SVERENO = "#e8730c";      // svěřeno MČ
+
+const renderer = L.canvas({ padding: 0.5 });
+const map = L.map("map", { renderer: renderer, preferCanvas: true }).setView([50.08, 14.44], 11);
+
+/* ---------- podklady ---------- */
+const ortofoto = L.tileLayer.wms("https://ags.cuzk.cz/arcgis1/services/ORTOFOTO/MapServer/WMSServer", {
+  layers: "0", format: "image/jpeg", version: "1.3.0", maxZoom: 20,
+  attribution: "ortofoto © ČÚZK"
+}).addTo(map);
+const osm = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 19, attribution: "© OpenStreetMap"
+});
+const katastr = L.tileLayer.wms("https://services.cuzk.cz/wms/wms.asp", {
+  layers: "hranice_parcel,parcelni_cisla", format: "image/png", transparent: true,
+  version: "1.3.0", maxZoom: 20, opacity: 0.9, attribution: "katastr © ČÚZK"
+});
+
+/* ---------- styly vektorů ---------- */
+function styleTR(f) {
+  return { color: BARVA_TR[f.properties.vyuziti] || "#999", weight: 0.6, opacity: 0.5,
+           fillColor: BARVA_TR[f.properties.vyuziti] || "#999", fillOpacity: 0.15 };
+}
+function styleParcela(f) {
+  const sv = f.properties.svereno == 1;
+  return { color: sv ? BARVA_SVERENO : BARVA_VLASTNI, weight: 1, opacity: 0.95,
+           fillColor: sv ? BARVA_SVERENO : BARVA_VLASTNI, fillOpacity: 0.35 };
+}
+const styleMC = { color: "#111", weight: 1.5, opacity: 0.8, fill: false, dashArray: "4 3" };
+
+/* ---------- načtení dat ---------- */
+const trLayer = L.geoJSON(null, { style: styleTR, renderer: renderer, interactive: false });
+const parLayer = L.geoJSON(null, { style: styleParcela, renderer: renderer, onEachFeature: onParcela });
+const mcLayer = L.geoJSON(null, { style: styleMC, renderer: renderer, interactive: false });
+const mcBounds = {};   // kod_mc -> L.latLngBounds
+
+function fmt(n) { return (n == null) ? "?" : n.toLocaleString("cs-CZ"); }
+function onParcela(f, layer) {
+  const p = f.properties;
+  const podil = p.podil < 1 ? " (spoluvlastnictví, podíl " + p.podil + ")" : "";
+  const sver = p.svereno == 1 ? "ano" : "ne";
+  layer.bindTooltip(
+    "<b>parc. č. " + (p.parcela || "?") + "</b>" + podil +
+    "<br>k.ú. kód: " + (p.ku || "?") +
+    "<br>výměra: " + fmt(p.vymera) + " m²" +
+    "<br>svěřeno MČ: " + sver +
+    "<br><span class='muted'>" + (p.nazev_mc || "") + "</span>",
+    { className: "parc", sticky: true });
+}
+
+Promise.all([
+  fetch("data/tr.geojson").then(r => r.json()),
+  fetch("data/majetek.geojson").then(r => r.json()),
+  fetch("data/mc.geojson").then(r => r.json())
+]).then(([tr, maj, mc]) => {
+  trLayer.addData(tr).addTo(map);
+  parLayer.addData(maj).addTo(map);
+  mcLayer.addData(mc).addTo(map);
+  mcLayer.eachLayer(l => { mcBounds[l.feature.properties.kod_mc] = l.getBounds(); });
+  buildSelect(mc);
+  map.fitBounds(mcLayer.getBounds());
+}).catch(e => alert("Chyba načtení dat: " + e));
+
+/* ---------- ovládání vrstev ---------- */
+L.control.layers(
+  { "Ortofoto (ČÚZK)": ortofoto, "Mapa (OSM)": osm },
+  { "Katastr – hranice + čísla (ČÚZK)": katastr,
+    "T/R plochy (MPP)": trLayer,
+    "Pozemky města v T/R": parLayer,
+    "Hranice MČ": mcLayer },
+  { collapsed: false }
+).addTo(map);
+
+/* ---------- výběr MČ ---------- */
+function buildSelect(mc) {
+  const feats = mc.features.slice().sort((a, b) => a.properties.nazev_mc.localeCompare(b.properties.nazev_mc, "cs"));
+  const ctrl = L.control({ position: "topleft" });
+  ctrl.onAdd = function () {
+    const d = L.DomUtil.create("div", "panel");
+    d.innerHTML = "<h1>Pozemky města v rozvojových plochách</h1>" +
+      "<label>Přejít na městskou část:</label>" +
+      "<select id='mc-select'><option value=''>Celá Praha</option>" +
+      feats.map(f => "<option value='" + f.properties.kod_mc + "'>" + f.properties.nazev_mc + "</option>").join("") +
+      "</select>";
+    L.DomEvent.disableClickPropagation(d);
+    L.DomEvent.disableScrollPropagation(d);
+    return d;
+  };
+  ctrl.addTo(map);
+  document.getElementById("mc-select").addEventListener("change", function () {
+    const v = this.value;
+    if (v && mcBounds[v]) map.fitBounds(mcBounds[v]);
+    else map.fitBounds(mcLayer.getBounds());
+  });
+}
+
+/* ---------- legenda ---------- */
+const legend = L.control({ position: "bottomright" });
+legend.onAdd = function () {
+  const d = L.DomUtil.create("div", "panel legend");
+  d.innerHTML =
+    "<div><b>Pozemky v majetku města</b></div>" +
+    "<div><i style='background:" + BARVA_VLASTNI + "'></i>přímo hl. m. Praha</div>" +
+    "<div><i style='background:" + BARVA_SVERENO + "'></i>svěřeno městské části</div>" +
+    "<div style='margin-top:6px'><b>T/R plochy (MPP)</b></div>" +
+    "<div><i style='background:" + BARVA_TR["obytná"] + "'></i>obytná</div>" +
+    "<div><i style='background:" + BARVA_TR["produkční"] + "'></i>produkční</div>" +
+    "<div><i style='background:" + BARVA_TR["rekreační"] + "'></i>rekreační</div>" +
+    "<div><i style='background:" + BARVA_TR["přírodní"] + "'></i>přírodní</div>" +
+    "<div class='muted' style='margin-top:6px;max-width:210px'>Zobrazeny jsou vlastněné parcely protínající transformační/rozvojové plochy. Nejde o rozlišení, zda jsou volné pro vybavenost.</div>";
+  return d;
+};
+legend.addTo(map);
+</script>
+</body>
+</html>
