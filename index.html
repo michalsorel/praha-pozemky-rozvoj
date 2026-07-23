@@ -102,9 +102,10 @@ function barvaParcely(p) {
 }
 function styleParcela(f) {
   const c = barvaParcely(f.properties);
-  // hranice zeslabena: rozdíl opacity hranice(0.67) vs výplň(0.4) je ~poloviční
-  // oproti původnímu (0.95 vs 0.4), aby obrys nepřebíjel barvu uvnitř parcely
-  return { color: c, weight: 1, opacity: 0.67, fillColor: c, fillOpacity: 0.4 };
+  // hranice zeslabena, aby obrys nepřebíjel barvu uvnitř parcely. Modrá (čistě
+  // magistrát 100 %) je ok na 0.67; ostatní tři barvy ještě slabší (0.55).
+  const opacity = c === BARVA_VLASTNI ? 0.67 : 0.45;
+  return { color: c, weight: 0.5, opacity: opacity, fillColor: c, fillOpacity: 0.4 };
 }
 /* hranice MČ = výrazná barevná čára s bílým lemem (kasingem), aby byla vidět
    univerzálně - jak globálně nad ortofotem, tak po přiblížení nad černými
