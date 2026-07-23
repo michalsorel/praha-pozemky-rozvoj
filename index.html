@@ -53,19 +53,20 @@
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
 /* ---------- barvy ---------- */
-const BARVA_TR = { "obytná": "#e06666", "produkční": "#8f8f8f", "rekreační": "#7fbf7f", "přírodní": "#3f8f5f", "nestanoveno": "#c9a24b" };
+const BARVA_TR = { "obytná": "#e06666", "produkční": "#3366cc", "rekreační": "#f4c40c", "přírodní": "#2e8b57", "nestanoveno": "#c9a24b" };
 const BARVA_VLASTNI = "#1f6feb";      // nesvěřeno, hl. m. Praha 100 % (modrá)
 const BARVA_SPOLU = "#8438d6";        // nesvěřeno, spoluvlastnictví (fialová)
 const BARVA_SVERENO = "#e8730c";      // svěřeno MČ, 100 % (oranžová)
 const BARVA_SVERENO_SPOLU = "#b5216b"; // svěřeno MČ, spoluvlastnictví (magenta - teplá, k fialové, ale daleko od BARVA_SPOLU i BARVA_MC)
 const BARVA_MC = "#ff1f8f";           // hranice MČ (výrazná, univerzální)
+const BARVA_STAT = "#fa3636";         // majetek státu (ČR) - červená z originální služby
 
 const map = L.map("map", { preferCanvas: true }).setView([50.08, 14.44], 11);
 
 /* Pořadí vrstev řešíme panes (funguje i při pozdějším líném načtení kontextu):
    pozadí (T/R plochy + kontext veškerý majetek) < průnik s T/R (sytě) < hranice MČ.
    Nepodkladové panes s pointer-events:none nechají klikat skrz na interaktivní. */
-[["pBg", 410, true], ["pFg", 420, false], ["pTop", 430, true]].forEach(([n, z, noEvt]) => {
+[["pBg", 410, true], ["pSrv", 418, true], ["pFg", 420, false], ["pTop", 430, true]].forEach(([n, z, noEvt]) => {
   map.createPane(n);
   map.getPane(n).style.zIndex = z;
   if (noEvt) map.getPane(n).style.pointerEvents = "none";
@@ -87,13 +88,119 @@ const katastr = L.tileLayer.wms("https://services.cuzk.cz/wms/wms.asp", {
   version: "1.3.0", maxZoom: 20, opacity: 0.9, attribution: "katastr © ČÚZK"
 });
 
+/* ---------- veškerý majetek SERVEREM (bez stahování 32 MB) ----------
+   ArcGIS MapServer sed/majetek renderuje polygony jako obrázek; přes dynamicLayers
+   mu předáme vlastní renderer, takže vykreslí v NAŠICH barvách/průhlednostech.
+   Podvrstva 1 = HMP 100 %, 2 = spoluvlastnictví; pole SVERENOMC ('A'=svěřeno MČ /
+   'N'=nesvěřeno) rozdělí každou na dvě → naše 4 kategorie. Barva [R,G,B,A],
+   A=alfa 0–255 (fill 0.4→102; obrys modrá 0.67→171, ostatní 0.45→115). */
+const SFS = (c, oc) => ({ type: "esriSFS", style: "esriSFSSolid", color: c,
+  outline: { type: "esriSLS", style: "esriSLSSolid", color: oc, width: 0.4 } });
+const UV = (mapLayerId, symN, symA) => ({
+  id: 100 + mapLayerId, source: { type: "mapLayer", mapLayerId: mapLayerId },
+  drawingInfo: { renderer: { type: "uniqueValue", field1: "SVERENOMC", uniqueValueInfos: [
+    { value: "N", symbol: symN }, { value: "A", symbol: symA } ] } }
+});
+const DYN_MAJETEK = encodeURIComponent(JSON.stringify([
+  UV(1, SFS([31, 111, 235, 102], [31, 111, 235, 171]),   // HMP 100 % (modrá) / svěřeno 100 % (oranžová)
+        SFS([232, 115, 12, 102], [232, 115, 12, 115])),
+  UV(2, SFS([132, 56, 214, 102], [132, 56, 214, 115]),   // spoluvl. (fialová) / svěřeno spoluvl. (magenta)
+        SFS([181, 33, 107, 102], [181, 33, 107, 115])),
+]));
+/* Majetek státu: služba sed/klasifikace_vlastniku, vrstva 2 (Vlastnické třídy
+   pozemků), pole TRIDAVL; třída "ČR..." má v originále červenou #fa3636. */
+const DYN_STAT = encodeURIComponent(JSON.stringify([{
+  id: 202, source: { type: "mapLayer", mapLayerId: 2 },
+  definitionExpression: "TRIDAVL='ČR včetně státem ovládaných subjektů'",
+  drawingInfo: { renderer: { type: "simple", symbol: SFS([250, 54, 54, 102], [250, 54, 54, 130]) } },
+}]));
+const BASE_MAJETEK = "https://gs-pub.praha.eu/arcgis/rest/services/sed/majetek/MapServer";
+const BASE_KLASIF = "https://gs-pub.praha.eu/arcgis/rest/services/sed/klasifikace_vlastniku/MapServer";
+const EXPORT_MAJETEK = BASE_MAJETEK + "/export";
+const EXPORT_KLASIF = BASE_KLASIF + "/export";
+// obecná dlaždicová vrstva volající ArcGIS export s předaným rendererem (dynamicLayers).
+// dx/dy = pevná korekce request-bboxu v metrech (3857) - klasifikační služba má
+// oproti majetku/katastru jinou výchozí datumovou transformaci a je konstantně
+// posunutá o cca (+8, +13.2) m po celé Praze (změřeno korelací; posunem
+// request-bboxu se to srovná na 0).
+const ArcGISDyn = L.TileLayer.extend({
+  getTileUrl: function (coords) {
+    const size = this.getTileSize();
+    const nw = coords.scaleBy(size), se = nw.add(size);
+    const a = L.CRS.EPSG3857.project(map.unproject(nw, coords.z));
+    const b = L.CRS.EPSG3857.project(map.unproject(se, coords.z));
+    const dx = this.options.dx || 0, dy = this.options.dy || 0;
+    const bbox = [Math.min(a.x, b.x) + dx, Math.min(a.y, b.y) + dy,
+                  Math.max(a.x, b.x) + dx, Math.max(a.y, b.y) + dy].join(",");
+    return this.options.exportUrl + "?f=image&format=png32&transparent=true&bboxSR=3857&imageSR=3857" +
+      "&size=" + size.x + "," + size.y + "&bbox=" + bbox + "&dynamicLayers=" + this.options.dyn;
+  }
+});
+const serverLayer = new ArcGISDyn("", { pane: "pSrv", tileSize: 256, maxZoom: 20,
+  exportUrl: EXPORT_MAJETEK, dyn: DYN_MAJETEK, attribution: "majetek © IPR / MHMP" });
+const serverStat = new ArcGISDyn("", { pane: "pSrv", tileSize: 256, maxZoom: 20,
+  exportUrl: EXPORT_KLASIF, dyn: DYN_STAT, dx: 8.0, dy: 13.2,
+  attribution: "klasifikace vlastníků © IPR / MHMP" });
+
+/* ---------- identify po kliknutí (serverové rastrové vrstvy nemají hover tooltip) ----------
+   Když běží serverová vrstva, kliknutí dotáže službu bodovým query (CORS je povolený)
+   a ukáže popup s vlastnictvím parcely. U státní služby se bod posouvá stejnou korekcí
+   (+8, +13.2) jako render, aby identify seděl na to, co je vidět. */
+function queryBod(base, layerIds, x, y, fields) {
+  let i = 0;
+  const step = () => {
+    if (i >= layerIds.length) return Promise.resolve(null);
+    const lid = layerIds[i++];
+    const url = base + "/" + lid + "/query?f=json&returnGeometry=false" +
+      "&spatialRel=esriSpatialRelIntersects&geometryType=esriGeometryPoint&inSR=3857" +
+      "&geometry=" + x + "," + y + "&outFields=" + encodeURIComponent(fields.join(","));
+    return fetch(url).then(r => r.json())
+      .then(d => { const f = (d.features || [])[0]; return f ? { layerId: lid, a: f.attributes } : step(); })
+      .catch(() => step());
+  };
+  return step();
+}
+function popupHMP(a) {
+  const svereno = a.SVERENOMC === "A", spolu = a.SPOLUVLAST === "A";
+  const kat = (svereno ? "svěřeno MČ" : "hl. m. Praha") + (spolu ? " – spoluvlastnictví" : " – 100 %");
+  const podil = spolu && a.PODIL_CITATEL ? " (podíl " + a.PODIL_CITATEL + "/" + a.PODIL_JMENOVATEL + ")" : "";
+  return "<b>parc. č. " + (a.PARCELA || "?") + "</b><br>" + kat + podil +
+    "<br><span class='muted'>k.ú. kód: " + (a.KATUZE_KOD || "?") + "</span>";
+}
+function popupStat(a) {
+  return "<b>parc. č. " + (a.PARCELA || "?") + "</b><br>majetek státu (ČR)" +
+    "<br><span class='muted'>třída: " + (a.TRIDAVL || "?") + (a.KATASTR ? "<br>k.ú.: " + a.KATASTR : "") + "</span>";
+}
+map.on("click", function (e) {
+  const hmp = map.hasLayer(serverLayer), stat = map.hasLayer(serverStat);
+  if (!hmp && !stat) return;   // identify jen když běží serverová vrstva
+  const p = L.CRS.EPSG3857.project(e.latlng);
+  const jobs = [];
+  if (hmp) jobs.push(queryBod(BASE_MAJETEK, [1, 2], p.x, p.y,
+    ["PARCELA", "KATUZE_KOD", "SVERENOMC", "SPOLUVLAST", "PODIL_CITATEL", "PODIL_JMENOVATEL"])
+    .then(r => r ? popupHMP(r.a) : ""));
+  if (stat) jobs.push(queryBod(BASE_KLASIF, [2], p.x + 8.0, p.y + 13.2, ["PARCELA", "TRIDAVL", "KATASTR"])
+    .then(r => (r && /^ČR/.test(r.a.TRIDAVL || "")) ? popupStat(r.a) : ""));   // jen skutečně státní
+  Promise.all(jobs).then(parts => {
+    const html = parts.filter(Boolean).join("<hr style='margin:6px 0;border:none;border-top:1px solid #ccc'>");
+    if (html) L.popup({ maxWidth: 260 }).setLatLng(e.latlng).setContent(html).openOn(map);
+  });
+});
+
 /* ---------- styly vektorů ---------- */
+// per-druh zvýraznění (nad ortofotem jinak nebytové plochy mizí, hlavně zelené)
+const STYL_TR = {
+  "obytná":      { fillOpacity: 0.28, weight: 1.0, opacity: 0.80 },
+  "produkční":   { fillOpacity: 0.30, weight: 1.0, opacity: 0.85 },
+  "rekreační":   { fillOpacity: 0.28, weight: 1.0, opacity: 0.82 },
+  "přírodní":    { fillOpacity: 0.30, weight: 1.1, opacity: 0.88 },
+  "nestanoveno": { fillOpacity: 0.12, weight: 0.6, opacity: 0.45 },
+};
 function styleTR(f) {
   const v = f.properties.vyuziti;
   const c = BARVA_TR[v] || "#999";
-  const ob = v === "obytná";   // obytné mírně zvýraznit (jinak proti pozadí mizí)
-  return { color: c, weight: ob ? 1 : 0.6, opacity: ob ? 0.8 : 0.45,
-           fillColor: c, fillOpacity: ob ? 0.28 : 0.12 };
+  const s = STYL_TR[v] || { fillOpacity: 0.15, weight: 0.6, opacity: 0.5 };
+  return { color: c, weight: s.weight, opacity: s.opacity, fillColor: c, fillOpacity: s.fillOpacity };
 }
 function barvaParcely(p) {
   const spolu = p.podil < 1;
@@ -114,20 +221,15 @@ const styleMC = { color: BARVA_MC, weight: 2.5, opacity: 1, fill: false, dashArr
 const styleMCLem = { color: "#ffffff", weight: 5.5, opacity: 0.55, fill: false, lineCap: "round" };
 
 /* ---------- načtení dat ----------
-   Dvě sady pozemků (obě STEJNÉ plné barvy dle vlastnictví - nezávisí na T/R):
-   parClipped = majetek oříznutý na průnik s T/R plochami (data/majetek.geojson),
-   parAll     = veškerý majetek města i mimo T/R (data/vsechen_majetek.geojson, 32 MB,
-                načítá se líně až když je potřeba). Přepínač "Pozemky jen v T/R"
-                rozhoduje, která z nich se zobrazí. */
+   parClipped = majetek oříznutý na průnik s T/R plochami (data/majetek.geojson).
+   Veškerý majetek (mimo režim „jen v T/R") se bere SERVEROVĚ (serverLayer, viz výše) -
+   žádný 32MB soubor se nestahuje. */
 const trLayer = L.geoJSON(null, { style: styleTR, renderer: rBg, interactive: false });
 const parClipped = L.geoJSON(null, { style: styleParcela, renderer: rFg, onEachFeature: onParcela });
-const parAll = L.geoJSON(null, { style: styleParcela, renderer: rFg, onEachFeature: onParcela });
 const mcLem = L.geoJSON(null, { style: styleMCLem, renderer: rTop, interactive: false });
 const mcLine = L.geoJSON(null, { style: styleMC, renderer: rTop, interactive: false });
 const mcLayer = L.layerGroup([mcLem, mcLine]);   // lem pod barevnou čárou
 const mcBounds = {};   // kod_mc -> L.latLngBounds
-let vseLoaded = false;    // veškerý majetek už načten
-let vseLoading = null;    // rozpracovaný fetch (aby se nespustil dvakrát)
 /* MPP vrstvy (T/R plochy + omezení pozemků jen na T/R) jsou implicitně vypnuté;
    zapnou se URL parametrem ?TRplochy (např. ?TRplochy nebo ?TRplochy=1). */
 const _trParam = new URLSearchParams(location.search).get("TRplochy");
@@ -164,31 +266,18 @@ Promise.all([
   map.fitBounds(mcLine.getBounds());
 }).catch(e => alert("Chyba načtení dat: " + e));
 
-/* líné načtení veškerého majetku (velký soubor) - jen když je poprvé potřeba */
-function loadVse() {
-  if (vseLoaded) return Promise.resolve();
-  if (vseLoading) return vseLoading;
-  vseLoading = fetch("data/vsechen_majetek.geojson").then(r => r.json())
-    .then(d => { parAll.addData(d); vseLoaded = true; })
-    .catch(err => { vseLoading = null; alert("Chyba načtení veškerého majetku: " + err); return Promise.reject(err); });
-  return vseLoading;
-}
-
 /* ---------- logika zobrazení pozemků ----------
    "Pozemky města" = hlavní přepínač, zda pozemky vůbec kreslit.
-   "Pozemky jen v T/R" = zda je omezit na průnik s T/R (parClipped),
-   nebo ukázat veškerý majetek (parAll). Barvy jsou v obou případech stejné. */
+   "Pozemky jen v T/R" (jen v režimu MPP) = oříznutý vektor (parClipped) vs. veškerý
+   majetek. Veškerý majetek se kreslí SERVEROVĚ (serverLayer) - žádný 32MB soubor. */
 const stav = { pozemky: true, jenTR: mppOn };
+function setLayer(layer, on) {
+  if (on && !map.hasLayer(layer)) map.addLayer(layer);
+  else if (!on && map.hasLayer(layer)) map.removeLayer(layer);
+}
 function updateParcely() {
-  const showClip = stav.pozemky && stav.jenTR;
-  const showAll  = stav.pozemky && !stav.jenTR;
-  if (showClip && !map.hasLayer(parClipped)) parClipped.addTo(map);
-  if (!showClip && map.hasLayer(parClipped)) map.removeLayer(parClipped);
-  if (showAll) {
-    loadVse().then(() => { if (stav.pozemky && !stav.jenTR && !map.hasLayer(parAll)) parAll.addTo(map); });
-  } else if (map.hasLayer(parAll)) {
-    map.removeLayer(parAll);
-  }
+  setLayer(parClipped, stav.pozemky && stav.jenTR);
+  setLayer(serverLayer, stav.pozemky && !stav.jenTR);
 }
 
 /* ---------- schovávací panel (dock) ----------
@@ -245,6 +334,7 @@ function buildControls(mc) {
     "<label><input type='checkbox' id='l-kat'> Katastr</label>" +
     "<label><input type='checkbox' id='l-mc' checked> Hranice MČ</label>" +
     "<label><input type='checkbox' id='l-poz' checked> Pozemky města</label>" +
+    "<label><input type='checkbox' id='l-stat'> Majetek státu (ČR)</label>" +
     "<hr class='sep'>" +
     "<label><input type='checkbox' id='l-tr'" + (mppOn ? " checked" : "") + "> T/R plochy (MPP)</label>" +
     "<label><input type='checkbox' id='l-jentr'" + (mppOn ? " checked" : "") + "> Pozemky jen v T/R</label>";
@@ -261,6 +351,7 @@ function buildControls(mc) {
   $("l-tr").addEventListener("change", function () { this.checked ? trLayer.addTo(map) : map.removeLayer(trLayer); });
   $("l-poz").addEventListener("change", function () { stav.pozemky = this.checked; updateParcely(); });
   $("l-jentr").addEventListener("change", function () { stav.jenTR = this.checked; updateParcely(); });
+  $("l-stat").addEventListener("change", function () { setLayer(serverStat, this.checked); });
   return dk.dock;
 }
 
@@ -273,14 +364,15 @@ legendDk.body.innerHTML =
     "<div><i style='background:" + BARVA_SPOLU + "'></i>hl. m. Praha – spoluvlastnictví</div>" +
     "<div><i style='background:" + BARVA_SVERENO + "'></i>svěřeno MČ – 100 %</div>" +
     "<div><i style='background:" + BARVA_SVERENO_SPOLU + "'></i>svěřeno MČ – spoluvlastnictví</div>" +
+    "<div><i style='background:" + BARVA_STAT + "'></i>majetek státu (ČR)</div>" +
     "<div style='margin-top:6px'><b>Hranice</b></div>" +
     "<div><i style='background:" + BARVA_MC + "'></i>městská část</div>" +
     "<div style='margin-top:6px'><b>T/R plochy (MPP)</b></div>" +
     "<div><i style='background:" + BARVA_TR["obytná"] + "'></i>obytná</div>" +
     "<div><i style='background:" + BARVA_TR["produkční"] + "'></i>produkční</div>" +
     "<div><i style='background:" + BARVA_TR["rekreační"] + "'></i>rekreační</div>" +
-    "<div><i style='background:" + BARVA_TR["přírodní"] + "'></i>přírodní <span class='muted'>(obytná zvýrazněna)</span></div>" +
-    "<div class='muted' style='margin-top:6px;max-width:220px'>Barvy pozemků jsou stejné bez ohledu na jejich polohu. Přepínačem <b>„Pozemky jen v T/R“</b> lze zobrazení omezit na průnik s T/R plochami, jinak se ukáže <b>veškerý majetek města</b> i mimo T/R. Nejde o rozlišení, zda je pozemek volný pro vybavenost.</div>";
+    "<div><i style='background:" + BARVA_TR["přírodní"] + "'></i>přírodní</div>" +
+    "<div class='muted' style='margin-top:6px;max-width:220px'>Přepínačem <b>„Pozemky jen v T/R“</b> lze zobrazení omezit na průnik s T/R plochami, jinak se ukáže <b>veškerý majetek města</b> i mimo T/R.</div>";
 
 /* ---------- tlačítko „moje poloha" (pod zoomem vlevo nahoře) ---------- */
 let locMarker = null;
