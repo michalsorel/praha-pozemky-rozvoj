@@ -89,27 +89,23 @@ const katastr = L.tileLayer.wms("https://services.cuzk.cz/wms/wms.asp", {
 });
 
 /* ---------- veškerý majetek SERVEREM (bez stahování 32 MB) ----------
-   ArcGIS MapServer renderuje polygony jako obrázek; přes dynamicLayers mu předáme
-   vlastní renderer → vykreslí v NAŠICH barvách/průhlednostech. Barva [R,G,B,A],
-   A=alfa 0–255 (fill 0.4→102; obrys modrá 0.67→171, ostatní 0.45→115).
-   Zdroj = sed/hmp_vlastnictvi_sprava, vrstva 0 (bez měřítkového omezení, kreslí
-   i při oddálení - na rozdíl od sed/majetek, jehož skupina má minScale 25000).
-   Naše 4 kategorie z polí: vlastnictví TRIDAVL ('Hl.m. Praha'=100 % /
-   'Pod…'=Podílnictví s HMP=spoluvlastnictví) × správa TRIDAHO ('M…'=Městské
-   části=svěřeno MČ). */
+   ArcGIS MapServer sed/majetek renderuje polygony jako obrázek; přes dynamicLayers
+   mu předáme vlastní renderer, takže vykreslí v NAŠICH barvách/průhlednostech.
+   Podvrstva 1 = HMP 100 %, 2 = spoluvlastnictví; pole SVERENOMC ('A'=svěřeno MČ /
+   'N'=nesvěřeno) rozdělí každou na dvě → naše 4 kategorie. Barva [R,G,B,A],
+   A=alfa 0–255 (fill 0.4→102; obrys modrá 0.67→171, ostatní 0.45→115). */
 const SFS = (c, oc) => ({ type: "esriSFS", style: "esriSFSSolid", color: c,
   outline: { type: "esriSLS", style: "esriSLSSolid", color: oc, width: 0.4 } });
-const ENT = (id, defx, fill, outline) => ({
-  id: id, source: { type: "mapLayer", mapLayerId: 0 }, minScale: 0, maxScale: 0,
-  definitionExpression: defx, drawingInfo: { renderer: { type: "simple", symbol: SFS(fill, outline) } }
+const UV = (mapLayerId, symN, symA) => ({
+  id: 100 + mapLayerId, source: { type: "mapLayer", mapLayerId: mapLayerId },
+  drawingInfo: { renderer: { type: "uniqueValue", field1: "SVERENOMC", uniqueValueInfos: [
+    { value: "N", symbol: symN }, { value: "A", symbol: symA } ] } }
 });
-const NESV = "(TRIDAHO IS NULL OR TRIDAHO NOT LIKE 'M%')";   // nesvěřeno
-const SVER = "TRIDAHO LIKE 'M%'";                            // svěřeno MČ (Městské části…)
 const DYN_MAJETEK = encodeURIComponent(JSON.stringify([
-  ENT(101, "TRIDAVL LIKE 'Hl.m. Praha%' AND " + NESV, [31, 111, 235, 102], [31, 111, 235, 171]),  // HMP 100 % modrá
-  ENT(102, "TRIDAVL LIKE 'Pod%' AND " + NESV, [132, 56, 214, 102], [132, 56, 214, 115]),           // spoluvl. fialová
-  ENT(103, "TRIDAVL LIKE 'Hl.m. Praha%' AND " + SVER, [232, 115, 12, 102], [232, 115, 12, 115]),   // svěřeno 100 % oranžová
-  ENT(104, "TRIDAVL LIKE 'Pod%' AND " + SVER, [181, 33, 107, 102], [181, 33, 107, 115]),           // svěřeno spoluvl. magenta
+  UV(1, SFS([31, 111, 235, 102], [31, 111, 235, 171]),   // HMP 100 % (modrá) / svěřeno 100 % (oranžová)
+        SFS([232, 115, 12, 102], [232, 115, 12, 115])),
+  UV(2, SFS([132, 56, 214, 102], [132, 56, 214, 115]),   // spoluvl. (fialová) / svěřeno spoluvl. (magenta)
+        SFS([181, 33, 107, 102], [181, 33, 107, 115])),
 ]));
 /* Majetek státu: služba sed/klasifikace_vlastniku, vrstva 2 (Vlastnické třídy
    pozemků), pole TRIDAVL; třída "ČR..." má v originále červenou #fa3636. */
@@ -118,15 +114,15 @@ const DYN_STAT = encodeURIComponent(JSON.stringify([{
   definitionExpression: "TRIDAVL='ČR včetně státem ovládaných subjektů'",
   drawingInfo: { renderer: { type: "simple", symbol: SFS([250, 54, 54, 102], [250, 54, 54, 130]) } },
 }]));
-const BASE_MAJETEK = "https://gp-dc.iprpraha.cz/arcgis/rest/services/sed/hmp_vlastnictvi_sprava/MapServer";
+const BASE_MAJETEK = "https://gs-pub.praha.eu/arcgis/rest/services/sed/majetek/MapServer";
 const BASE_KLASIF = "https://gs-pub.praha.eu/arcgis/rest/services/sed/klasifikace_vlastniku/MapServer";
 const EXPORT_MAJETEK = BASE_MAJETEK + "/export";
 const EXPORT_KLASIF = BASE_KLASIF + "/export";
 // obecná dlaždicová vrstva volající ArcGIS export s předaným rendererem (dynamicLayers).
-// dx/dy = pevná korekce request-bboxu v metrech (3857): služby hmp_vlastnictvi_sprava
-// i klasifikace_vlastniku mají oproti katastru jinou výchozí datumovou transformaci
-// a jsou konstantně posunuté o cca (+8, +13.2) m po celé Praze (změřeno korelací;
-// posunem request-bboxu se to srovná na 0). sed/majetek posun nemá (sedí na katastr).
+// dx/dy = pevná korekce request-bboxu v metrech (3857) - klasifikační služba má
+// oproti majetku/katastru jinou výchozí datumovou transformaci a je konstantně
+// posunutá o cca (+8, +13.2) m po celé Praze (změřeno korelací; posunem
+// request-bboxu se to srovná na 0).
 const ArcGISDyn = L.TileLayer.extend({
   getTileUrl: function (coords) {
     const size = this.getTileSize();
@@ -141,8 +137,7 @@ const ArcGISDyn = L.TileLayer.extend({
   }
 });
 const serverLayer = new ArcGISDyn("", { pane: "pSrv", tileSize: 256, maxZoom: 20,
-  exportUrl: EXPORT_MAJETEK, dyn: DYN_MAJETEK, dx: 8.0, dy: 13.2,
-  attribution: "majetek HMP © IPR / MHMP" });
+  exportUrl: EXPORT_MAJETEK, dyn: DYN_MAJETEK, attribution: "majetek © IPR / MHMP" });
 const serverStat = new ArcGISDyn("", { pane: "pSrv", tileSize: 256, maxZoom: 20,
   exportUrl: EXPORT_KLASIF, dyn: DYN_STAT, dx: 8.0, dy: 13.2,
   attribution: "klasifikace vlastníků © IPR / MHMP" });
@@ -166,11 +161,11 @@ function queryBod(base, layerIds, x, y, fields) {
   return step();
 }
 function popupHMP(a) {
-  const spolu = /^Pod/.test(a.TRIDAVL || "");   // Podílnictví = spoluvlastnictví
-  const svereno = /^M/.test(a.TRIDAHO || "");    // Městské části = svěřeno MČ
+  const svereno = a.SVERENOMC === "A", spolu = a.SPOLUVLAST === "A";
   const kat = (svereno ? "svěřeno MČ" : "hl. m. Praha") + (spolu ? " – spoluvlastnictví" : " – 100 %");
-  return "<b>parc. č. " + (a.PARCELA || "?") + "</b><br>" + kat +
-    "<br><span class='muted'>k.ú.: " + (a.KATASTR || "?") + "</span>";
+  const podil = spolu && a.PODIL_CITATEL ? " (podíl " + a.PODIL_CITATEL + "/" + a.PODIL_JMENOVATEL + ")" : "";
+  return "<b>parc. č. " + (a.PARCELA || "?") + "</b><br>" + kat + podil +
+    "<br><span class='muted'>k.ú. kód: " + (a.KATUZE_KOD || "?") + "</span>";
 }
 function popupStat(a) {
   return "<b>parc. č. " + (a.PARCELA || "?") + "</b><br>majetek státu (ČR)" +
@@ -181,9 +176,9 @@ map.on("click", function (e) {
   if (!hmp && !stat) return;   // identify jen když běží serverová vrstva
   const p = L.CRS.EPSG3857.project(e.latlng);
   const jobs = [];
-  if (hmp) jobs.push(queryBod(BASE_MAJETEK, [0], p.x + 8.0, p.y + 13.2,
-    ["PARCELA", "KATASTR", "TRIDAVL", "TRIDAHO"])
-    .then(r => (r && /^(Hl\.m\. Praha|Pod)/.test(r.a.TRIDAVL || "")) ? popupHMP(r.a) : ""));
+  if (hmp) jobs.push(queryBod(BASE_MAJETEK, [1, 2], p.x, p.y,
+    ["PARCELA", "KATUZE_KOD", "SVERENOMC", "SPOLUVLAST", "PODIL_CITATEL", "PODIL_JMENOVATEL"])
+    .then(r => r ? popupHMP(r.a) : ""));
   if (stat) jobs.push(queryBod(BASE_KLASIF, [2], p.x + 8.0, p.y + 13.2, ["PARCELA", "TRIDAVL", "KATASTR"])
     .then(r => (r && /^ČR/.test(r.a.TRIDAVL || "")) ? popupStat(r.a) : ""));   // jen skutečně státní
   Promise.all(jobs).then(parts => {
