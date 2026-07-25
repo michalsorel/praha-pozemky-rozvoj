@@ -184,8 +184,24 @@ function setBase(key) {
   if (key === "zaklcb" && !zaklCb) { buildGLBase(SVC_ZAKL_CB, l => { zaklCb = l; if (baseWanted === "zaklcb") setBase("zaklcb"); }); return; }
   const target = baseLayerFor(key);
   if (!target) return;   // vektorová vrstva se ještě staví; přepne se v callbacku výše
+  // OSM má nižší max. přiblížení než ostatní podklady → při přepnutí zblízka oddálit
+  // na jeho nejbližší možné měřítko (jinak by při velkém zoomu nebyla vidět).
+  if (key === "osm" && map.getZoom() > osm.options.maxZoom) map.setZoom(osm.options.maxZoom);
   [ortofoto, osm, zaklBarevna, zaklCb].forEach(l => { if (l && l !== target && map.hasLayer(l)) map.removeLayer(l); });
   target.addTo(map);
+  // maplibre po přidání vykreslí jen část dlaždic a s posunem, dokud nepřijde
+  // pohyb myší. Ten volá plugin `_update` (přepočet polohy kontejneru + synchro
+  // středu/zoomu GL s Leafletem) — zavoláme ho tedy sami (resize řeší jen
+  // velikost canvasu, ne ten posun). Na raf i s pojistkou po 200 ms.
+  if (target.getMaplibreMap) {
+    const fix = function () {
+      if (!target._map) return;
+      if (target._update) target._update();
+      const g = target.getMaplibreMap();
+      if (g) g.resize();
+    };
+    requestAnimationFrame(fix); setTimeout(fix, 200);
+  }
 }
 
 /* ---------- identify po kliknutí (serverové rastrové vrstvy nemají hover tooltip) ----------
